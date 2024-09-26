@@ -84,8 +84,8 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 	ImagePlus imp;
 	int nParticles;
 	static String buildNo = "Build 111031";
-	static int fontSize = 16;
-	static int minSize = 100;
+	static int fontSize = 20;
+	static int minSize = 10;
 	static int maxSize = 400;
 	static float maxVelocity = 10;
 	static float maxAreaChange = 30;
@@ -96,7 +96,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 	static boolean bSaveResultsFile = false;
 	static boolean bShowLabels = true;
 	static boolean bShowPositions = true;
-	static boolean bShowPaths = false;
+	static boolean bShowPaths = true;
 	static boolean bShowPathLengths = true;
 	static boolean bShowSummary = true;
 	static boolean bRoundCoord = false;
@@ -120,15 +120,11 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 	// EOKP
 
 	private TextWindow tw;
-	private TextWindow tw2;
 	private String directory, filename, rawFilename;
 
 	private static String prevHdr;
 	private String summaryHdr = "File\tnObj\tnObjFrm\tnFrames\tnTracks\ttotLength\tObjFrames\tObjSeconds\tavgSpeed\tavgArea\tavgPerim\tstdSpeed\tstdArea\tstdPerim"; // (KP)
-	private static String prevhHdr;
-	private String histogramHdr = "";
 	private double pixelWidth = 1.0, pixelHeight = 1.0;
-	private boolean suppressHeader;
 	boolean done;
 
 	// #region Particle Class TODO:
@@ -150,7 +146,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		int trackNum;
 		boolean inTrack = false;
 		boolean flag = false;
-		List<particle> claimed = new ArrayList<particle>();
 
 		public void copy(particle source) {
 			this.x = source.x;
@@ -174,6 +169,17 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 
 		public float sdistance(particle p) {
 			return (float) Math.sqrt(sqr(this.sx - p.sx) + sqr(this.sy - p.sy));
+		}
+	}
+
+	public class Track {
+		List<particle> particles = new ArrayList<particle>();
+		int startFrame;
+		int endFrame;
+		float distance;
+
+		public int length() {
+			return (this.endFrame - this.startFrame);
 		}
 	}
 
@@ -252,10 +258,8 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		/* Extract file name of movie file opened in ImageJ */
 
 		if (rawData < 0) {
-			suppressHeader = true;
 			rawData = -rawData;
 		} else {
-			suppressHeader = false;
 		}
 		;
 		rawFilename = imp.getTitle();
@@ -438,10 +442,10 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 
 		// TODO: Fix here
 
-		IJ.showStatus("Assembling tracks (edited by era)");
-		IJ.log("Assembling tracks (edited by era)");
+		IJ.showStatus("Assembling tracks");
+		IJ.log("Assembling tracks");
 
-		List tracks = new ArrayList();
+		List<Track> tracks = new ArrayList<Track>();
 		for (int i = 0; i <= (nFrames - 1); i++) {
 			IJ.showProgress((double) i / nFrames);
 
@@ -456,7 +460,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			if (particlesInFrame[i].size() <= 0)
 				continue;
 
-			IJ.log("Frame " + i + " has " + particlesInFrame[i].size() + " particles");
+			// IJ.log("Frame " + i + " has " + particlesInFrame[i].size() + " particles");
 
 			for (ListIterator particleIterator = particlesInFrame[i].listIterator(); particleIterator.hasNext();) {
 				particle particle = (particle) particleIterator.next();
@@ -466,20 +470,20 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 					continue;
 
 				// This must be the beginning of a new track
-				IJ.log("New track: " + (trackCount + 1) + " at frame " + i);
-				List track = new ArrayList();
+				Track track = new Track();
+				track.startFrame = i;
+				track.endFrame = 0;
 				trackCount++;
 
 				// Add particle to track
 				particle.inTrack = true;
 				particle.trackNum = trackCount;
-				track.add(particle);
+				track.particles.add(particle);
 
 				// search in next frames for more particles to be added to track
 				boolean trackExists = true;
 				particle prevParticle = particle;
 				for (int j = i + 1; j <= (nFrames - 1) && trackExists; j++) {
-					IJ.log("Looking ahead " + (j - i) + " frames");
 					List<particle> candidates = new ArrayList<>();
 					List<Float> candidateDistances = new ArrayList<>();
 					for (ListIterator nextParticleIterator = particlesInFrame[j].listIterator(); nextParticleIterator
@@ -487,10 +491,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 						particle testParticle = (particle) nextParticleIterator.next();
 						float distance = testParticle.distance(prevParticle);
 						float areaChange = 100 * Math.abs(1 - (testParticle.area / prevParticle.area));
-						if (i < 10) {
-							IJ.log("Distance: " + distance);
-							IJ.log("Area Change %: " + areaChange);
-						}
 						boolean fitsInPath = (distance / pixelWidth < maxVelocity) && (areaChange < maxAreaChange);
 						if (fitsInPath) {
 							candidates.add(testParticle);
@@ -499,42 +499,44 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 					}
 					if (candidates.size() == 0) {
 						trackExists = false;
-						IJ.log("Track " + trackCount + " ended at frame " + i + " after " + track.size() + " frames");
+						track.endFrame = j - 1;
+						IJ.log("Track " + trackCount + " ended at frame " + i + " after " +
+								track.particles.size() + " frames");
 					} else {
 						particle bestCandidate = getBestCandidate(candidates, candidateDistances);
 						bestCandidate.inTrack = true;
 						bestCandidate.trackNum = trackCount;
-						track.add(bestCandidate);
+						track.particles.add(bestCandidate);
 						prevParticle = bestCandidate;
 					}
+				}
+				if (track.endFrame == 0) {
+					track.endFrame = nFrames - 1;
 				}
 				tracks.add(track);
 			}
 		}
 
-		// #region Track Analysis
-
-		// #region 'Map' of tracks
-		IJ.showStatus("Generating map of tracks...");
+		// #region Raw tracks
+		IJ.showStatus("Generating map of raw tracks...");
+		IJ.log("Generating map of raw tracks...");
 		if (bShowPaths) {
-			ip = new ByteProcessor(imp.getWidth(), imp.getHeight());
+			ip = new ColorProcessor(imp.getWidth(), imp.getHeight());
 			ip.setColor(Color.white);
 			ip.fill();
-			trackCount = 0;
-			for (ListIterator tracksIterator = tracks.listIterator(); tracksIterator.hasNext();) {
-				List track = (ArrayList) tracksIterator.next();
-				trackCount++;
-				ListIterator currTrackIterator = track.listIterator();
-				particle oldParticle = (particle) currTrackIterator.next();
+			for (ListIterator<Track> tracksIterator = tracks.listIterator(); tracksIterator.hasNext();) {
+				Track track = tracksIterator.next();
+				ListIterator<particle> particleIterator = track.particles.listIterator();
+				particle oldParticle = particleIterator.next();
 
-				if (track.size() < minTrackLength) {
+				if (track.particles.size() < minTrackLength) {
 					ip.setColor("grey");
 				} else {
-					ip.setColor("pink");
+					ip.setColor("blue");
 				}
 
-				while (currTrackIterator.hasNext()) {
-					particle newParticle = (particle) currTrackIterator.next();
+				while (particleIterator.hasNext()) {
+					particle newParticle = particleIterator.next();
 					ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y / pixelHeight));
 					ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
 					oldParticle = newParticle;
@@ -543,7 +545,152 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			new ImagePlus("All Paths", ip).show();
 		}
 
-		// TODO: end
+		// #region Track Analysis
+		float maxStitchDistance = 25f;
+		IJ.log("Stitching tracks with max dist: " + maxStitchDistance);
+		List<Track> activeTracks = new ArrayList<>();
+		List<Track> lostTracks = new ArrayList<>();
+		for (int frame = 0; frame < nFrames; frame++) {
+			List<Track> tracksStartedThisFrame = getTracksStartedInFrame(tracks, frame);
+
+			// If this is the first frame, set all the tracks to active
+			if (frame == 0) {
+				activeTracks.addAll(tracksStartedThisFrame);
+				continue;
+			}
+
+			// Try to stitch the new tracks onto the lost tracks
+			Map<Integer, Track> stitchMap = new HashMap<Integer, Track>();
+			for (int i = 0; i < lostTracks.size(); i++) {
+				Track lostTrack = lostTracks.get(i);
+				particle last = lostTrack.particles.get(lostTrack.particles.size() - 1);
+				Track bestMatch = null;
+				float bestDistance = maxStitchDistance;
+				for (int j = 0; j < tracksStartedThisFrame.size(); j++) {
+					Track newTrack = tracksStartedThisFrame.get(j);
+					particle first = newTrack.particles.get(0);
+					float distance = first.distance(last);
+					if (distance < bestDistance) {
+						bestMatch = newTrack;
+						bestDistance = distance;
+					}
+				}
+				if (bestMatch != null) {
+					tracksStartedThisFrame.remove(bestMatch);
+					stitchMap.put(i, bestMatch);
+				}
+			}
+
+			Iterator<Map.Entry<Integer, Track>> stitchIterator = stitchMap.entrySet().iterator();
+			List<Track> found = new ArrayList<>();
+			while (stitchIterator.hasNext()) {
+				Map.Entry<Integer, Track> entry = stitchIterator.next();
+				Integer index = entry.getKey();
+				Track lostTrack = lostTracks.get(index);
+				Track newTrack = entry.getValue();
+				Track stitchedTrack = new Track();
+				stitchedTrack.startFrame = lostTrack.startFrame;
+				stitchedTrack.endFrame = newTrack.endFrame;
+				stitchedTrack.particles.addAll(lostTrack.particles);
+				stitchedTrack.particles.addAll(newTrack.particles);
+				found.add(lostTrack);
+				activeTracks.add(stitchedTrack);
+			}
+
+			for (Track t : found)
+				lostTracks.remove(t);
+
+			// Add any active tracks that end on this frame to Lost
+			Iterator<Track> activeIterator = activeTracks.iterator();
+			List<Track> removals = new ArrayList<>();
+			while (activeIterator.hasNext()) {
+				Track track = activeIterator.next();
+				if (track.endFrame == frame) {
+					removals.add(track);
+					lostTracks.add(track);
+				}
+			}
+			for (Track t : removals)
+				activeTracks.remove(t);
+		}
+
+		List<Track> allTracks = new ArrayList<>();
+		allTracks.addAll(activeTracks);
+		allTracks.addAll(lostTracks);
+
+		// #region Processed tracks
+		IJ.showStatus("Generating map of stitched tracks...");
+		IJ.log("Generating map of stitched tracks...");
+		if (bShowPaths) {
+			List<Integer> smoothingLevels = Arrays.asList(1, 10, 30, 60);
+			Iterator<Integer> smoothingIterator = smoothingLevels.iterator();
+			while (smoothingIterator.hasNext()) {
+				Integer smoothing = smoothingIterator.next();
+				IJ.log("Using smoothing level: " + smoothing);
+				ip = new ColorProcessor(imp.getWidth(), imp.getHeight());
+				ip.setColor(Color.white);
+				ip.fill();
+				String[] colors = { "red", "blue", "green", "orange" };
+				int i = 0;
+				for (ListIterator<Track> tracksIterator = allTracks.listIterator(); tracksIterator.hasNext();) {
+					Track track = tracksIterator.next();
+					track.distance = 0f;
+					IJ.log("Track length: " + track.length());
+					ListIterator<particle> particleIterator = track.particles.listIterator();
+					particle oldParticle = particleIterator.next();
+					ip.setColor(colors[i % colors.length]);
+					int j = 1; // Start at 1 bc of the initial set
+					while (particleIterator.hasNext()) {
+						particle newParticle = particleIterator.next();
+						if ((j % smoothing) == 0) {
+							track.distance += oldParticle.distance(newParticle);
+							ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y / pixelHeight));
+							ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
+							oldParticle = newParticle;
+						}
+						j++;
+					}
+					particle first = track.particles.get(0);
+					float offset = 10f;
+					ip.drawString("Track Distance: " + track.distance, Math.round(first.x + offset),
+							Math.round(first.y + offset));
+					i++;
+				}
+				new ImagePlus("Stitch distance: " + maxStitchDistance + ", Smoothing: " + smoothing, ip).show();
+			}
+		}
+
+		if (bShowLabels) {
+			// ImageStack newStack = imp.createEmptyStack();
+			// int yWidth = newStack.getWidth();
+			// for (int i = 0; i <= (nFrames - 1); i++) {
+			// if (IJ.escapePressed()) {
+			// IJ.beep();
+			// done = true;
+			// return;
+			// }
+			// int iFrame = i + 1;
+			// ImageProcessor imgProcessor = stack.getProcessor(iFrame);
+			// newStack.addSlice(stack.getSliceLabel(iFrame), imgProcessor.crop());
+			// ImageProcessor newImgProcessor = newStack.getProcessor(iFrame);
+			// newImgProcessor.setFont(new Font("SansSerif", Font.PLAIN, fontSize));
+			// newImgProcessor.setColor(Color.pink);
+
+			// Iterator<Track> trackIterator = allTracks.iterator();
+			// while (trackIterator.hasNext()) {
+			// Track track = trackIterator.next();
+
+			// }
+			// IJ.showProgress((double) iFrame / nFrames);
+			// }
+			// ImagePlus nimp = new ImagePlus(imp.getTitle() + " labels", newStack);
+			// nimp.setCalibration(imp.getCalibration());
+			// nimp.show();
+			// imp.show();
+			// nimp.updateAndDraw();
+		}
+
+		// TODO: era end
 
 		// Initiate the writing of an output textfile if a filename is given.
 
@@ -610,8 +757,9 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			if (bSmoothing) {
 				IJ.showStatus("Smoothing tracks...");
 				IJ.log("Smoothing tracks...");
-				for (ListIterator iT = tracks.listIterator(); iT.hasNext();) {
-					List bTrack = (ArrayList) iT.next();
+				for (ListIterator<Track> iT = tracks.listIterator(); iT.hasNext();) {
+					Track track = iT.next();
+					List bTrack = track.particles;
 					if (bTrack.size() >= minTrackLength) {
 						ListIterator jT = bTrack.listIterator();
 						particle oldParticle = (particle) jT.next();
@@ -683,8 +831,9 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			int displayTrackNum = 0;
 			int bendCount = 0;
 			int oldBendFrame = 0;
-			for (ListIterator iT = tracks.listIterator(); iT.hasNext();) {
-				List bTrack = (ArrayList) iT.next();
+			for (ListIterator<Track> iT = tracks.listIterator(); iT.hasNext();) {
+				Track track = iT.next();
+				List bTrack = track.particles;
 
 				if (bTrack.size() < minTrackLength)
 					continue;
@@ -824,89 +973,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 				else if (bendType > 1)
 					bends[displayTrackNum - 1] = (float) bendCount / 2;
 			}
-
-			//
-			// Generate a stack of plots, one for thrashing analysis of each track showing
-			// the raw angle or aspect ratio as well as the kpSum of the dA/dt
-			//
-
-			// if (bPlotBendTrack && bendType > 0) {
-			// IJ.showStatus("Plotting bend calculation plots");
-
-			// // plot the first bend calculation for the first track
-			// plotBendTrack = 1;
-			// String YaxisLabel = "Aspect ratio";
-			// if (bendType == 1)
-			// YaxisLabel = "Degrees";
-			// Plot plot = new Plot("Bend detection plot for track " + (int) plotBendTrack,
-			// "Frame#", YaxisLabel, times,
-			// sumDAngles[plotBendTrack]); // angles
-			// plot.setSize(nFrames + 150, 300);
-			// if (bendType > 1)
-			// plot.setLimits(firstFrames[plotBendTrack - 1], firstFrames[plotBendTrack - 1]
-			// + frames[plotBendTrack - 1], 0,
-			// Math.round(max(angles[plotBendTrack]) + 2));
-			// if (bendType == 1)
-			// plot.setLimits(firstFrames[plotBendTrack - 1], firstFrames[plotBendTrack - 1]
-			// + frames[plotBendTrack - 1],
-			// -200, 200);
-			// plot.setColor(Color.red);
-			// plot.addPoints(bendTimes[plotBendTrack], dAAreas[plotBendTrack], Plot.X);
-			// plot.setColor(Color.green);
-			// plot.addPoints(times, angles[plotBendTrack], PlotWindow.LINE); // dAngles
-			// sumDAngles
-			// float x1[] = { 0, nFrames };
-			// float y1[] = { minAngle, minAngle };
-			// plot.setColor(Color.blue);
-			// plot.addPoints(x1, y1, PlotWindow.LINE);
-			// plot.setColor(Color.black);
-			// plot.draw();
-			// ImagePlus pimp = plot.getImagePlus();
-			// ImageStack plotstack = pimp.createEmptyStack();
-			// ImageProcessor nip = plot.getProcessor();
-			// plotstack.addSlice("Bend detection plot for track " + (int) plotBendTrack,
-			// nip.crop());
-			// // Repeat for the rest of the plots
-			// for (int i = plotBendTrack; i < displayTrackNum; i++) {
-			// plotBendTrack++;
-			// IJ.showProgress((double) i / displayTrackNum);
-			// if (IJ.escapePressed()) {
-			// IJ.beep();
-			// done = true;
-			// return;
-			// }
-			// Plot plot2 = new Plot("Bend detection plot for track " + (int) plotBendTrack,
-			// "Frame#", YaxisLabel, times,
-			// sumDAngles[plotBendTrack]); // angles
-			// plot2.setSize(nFrames + 150, 300);
-			// if (bendType > 1)
-			// plot2.setLimits(firstFrames[plotBendTrack - 1], firstFrames[plotBendTrack -
-			// 1] + frames[plotBendTrack - 1],
-			// 0, Math.round(max(angles[plotBendTrack]) + 2));
-			// if (bendType == 1)
-			// plot2.setLimits(firstFrames[plotBendTrack - 1], firstFrames[plotBendTrack -
-			// 1] + frames[plotBendTrack - 1],
-			// -200, 200);
-			// plot2.setColor(Color.red);
-			// plot2.addPoints(bendTimes[plotBendTrack], dAAreas[plotBendTrack], Plot.X);
-			// plot2.setColor(Color.green);
-			// plot2.addPoints(times, angles[plotBendTrack], PlotWindow.LINE); // dAngles
-			// sumDAngles
-			// plot2.setColor(Color.blue);
-			// plot2.addPoints(x1, y1, PlotWindow.LINE);
-			// plot2.setColor(Color.black);
-			// plot2.draw();
-			// nip = plot2.getProcessor();
-			// plotstack.addSlice("Bend detection plot for track " + (int) plotBendTrack,
-			// nip.crop());
-			// }
-
-			// ImagePlus psimp = new ImagePlus(imp.getTitle() + " plots", plotstack);
-			// psimp.show();
-			// imp.show();
-			// psimp.updateAndDraw();
-
-			// }
 
 			if (writefile) {
 				try {
@@ -1065,84 +1131,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			}
 			// summarize the speed histogram for the movie
 
-			// if (binSize > 0) {
-			// histogramHdr = "Bin\t";
-			// String str2 = rawFilename + "\t";
-			// for (int i = 0; i < (int) (maxVelocity / binSize); i++) {
-			// int mySum = 0;
-			// histogramHdr += (float) fps * pixelWidth * i * binSize + "\t"; //
-			// pixels/frame * µm/pixels *frame/s
-			// // pixelWidth*
-			// for (int t = 0; t < displayTrackNum; t++) {
-			// mySum += bins[t][i];
-			// }
-			// ; // str = str +bins[t][i]+"\t";};
-			// str2 += (float) mySum + "\t";
-			// }
-
-			// Frame frame = WindowManager.getFrame("SpeedHistogram");
-			// if (frame != null && (frame instanceof TextWindow) &&
-			// histogramHdr.equals(prevhHdr))
-			// tw2 = (TextWindow) frame;
-
-			// if (tw2 == null) {
-			// String title = "SpeedHistogram";
-			// tw2 = new TextWindow(title, histogramHdr, str2, 450, 300);
-			// prevhHdr = histogramHdr;
-			// } else
-			// tw2.append(str2);
-			// }
-
-			/*
-			 * //KP MAX CONCURRENT VALUES
-			 * // Matrix that is nFrames for columns, and displayTrackNum for Rows
-			 * int[][] kpMatrix = new int[nFrames][displayTrackNum];
-			 * 
-			 * // Calculates the the lastFrame by adding each frame value to each firstFrame
-			 * value
-			 * int[] lastFrames = new int[displayTrackNum];
-			 * for (int i=0; i < displayTrackNum; i++) {
-			 * lastFrames[i] = firstFrames[i] + frames [i];
-			 * }
-			 * //Populates the kpMatrix with 1s from firstFrames[n] to lastFrames[n] one row
-			 * at a time
-			 * for(int n = 0; n < displayTrackNum; n++ ) {
-			 * for(int i = firstFrames[n]; i < lastFrames[n]; i++) {
-			 * kpMatrix[i][n] = 1;
-			 * }
-			 * }
-			 */
-			// Searches through kpMatrix one column at a time to find the maximum value,
-			// stores it in kpMax and kpFrm
-			// int kpSum;
-			// kpMax = 0;
-			// for (int i = 1; i < nFrames; i++) {
-			// kpSum = 0;
-			// // for(int n = 0; n < displayTrackNum; n++) {
-			// // kpSum += kpMatrix[i][n];
-			// kpSum = FrameTrackCount[i];
-			// // if (n == displayTrackNum-1) {
-			// if (kpSum > kpMax) {
-			// kpMax = kpSum;
-			// kpFrm = i;
-			// // }
-			// // }
-			// }
-			// // IJ.log("frame,"+(int) i+ "," + (int)kpSum);
-			// }
-
-			// For debugging. Outputs raw 1 and 0s to console
-			// for(int i = 0; i < displayTrackNum; i++) {
-			// row = "";
-			// for(int n = 0; n < nFrames; n++) {
-			// row = row + kpMatrix[n][i];
-			// if (n == nFrames-1) {
-			// System.out.println(row);
-			// }
-			// }
-			// }
-			// EOKP
-
 			// Generate summarized output
 			// filename,N,nTracks,TotLength,totFrames,TotTime,AvgSpeed,AvgArea,AvgPerim,StdSpeed,StdArea,StdPerim
 			if (bShowSummary) {
@@ -1234,211 +1222,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			}
 		}
 
-		// Output raw values based on user selection.
-		// Create the column headings based on the number of tracks
-		// with length greater than minTrackLength
-		// since the number of tracks can be larger than can be accomodated by Excell,
-		// we deliver the tracks in chunks of maxColumns
-		// As a side-effect, this makes the code quite complicated
-
-		// display the table with particle positions
-		// first when we only write to the screen
-
-		// String strHeadings = "Frame";
-		// trackCount = 1;
-		// for (ListIterator iT = tracks.listIterator(); iT.hasNext();) {
-		// List bTrack = (ArrayList) iT.next();
-		// if (bTrack.size() >= minTrackLength) {
-		// if (trackCount <= maxColumns) {
-		// if (rawData == 1)
-		// strHeadings += "\tX" + trackCount + "\tY" + trackCount + "\tFlag" +
-		// trackCount;
-		// if (rawData == 2)
-		// strHeadings += "\tMajor" + trackCount + "\tMinor" + trackCount + "\tAngle" +
-		// trackCount;
-		// if (rawData == 3)
-		// strHeadings += "\tArea" + trackCount + "\tPerimeter" + trackCount +
-		// "\tDistance" + trackCount;
-		// if (rawData == 4)
-		// strHeadings += "\tMajor" + trackCount + "\tMinor" + trackCount +
-		// "\tCircularity" + trackCount;
-		// if (rawData == 5)
-		// strHeadings += "\tShape" + trackCount + "\tRateOfChange" + trackCount +
-		// "\tSumOfChange" + trackCount;
-		// if (rawData == 6)
-		// strHeadings += "\tX" + trackCount + "\tY" + trackCount + "\tArea" +
-		// trackCount + "\tPerim"
-		// + trackCount + "\tAngle" + trackCount + "\tAR" + trackCount + "\tFlag" +
-		// trackCount;
-		// }
-		// trackCount++;
-		// }
-		// }
-		// float flag;
-		// String flags;
-		// int repeat = (int) ((trackCount / maxColumns));
-		// float reTest = (float) trackCount / (float) maxColumns;
-		// if (reTest > repeat)
-		// repeat++;
-
-		// if (!writefile && (rawData > 0)) { // bRawTracks) {
-		// ResultsTable rrt = new ResultsTable();
-		// for (int j = 1; j <= repeat; j++) {
-		// int to = j * maxColumns;
-		// if (to > trackCount - 1)
-		// to = trackCount - 1;
-		// rrt.reset();
-		// String stLine = "Raw Tracks " + ((j - 1) * maxColumns + 1) + " to " + to;
-		// // IJ.write(stLine);
-		// for (int i = 0; i <= (nFrames - 1); i++) {
-		// // String strLine = "" + (i+1);
-		// int trackNum = 0;
-		// int listTrackNum = 0;
-		// rrt.incrementCounter();
-		// for (ListIterator iT = tracks.listIterator(); iT.hasNext();) {
-		// trackNum++;
-		// List bTrack = (ArrayList) iT.next();
-		// boolean particleFound = false;
-		// if (bTrack.size() >= minTrackLength) {
-		// listTrackNum++;
-		// if ((listTrackNum > ((j - 1) * maxColumns)) && (listTrackNum <= (j *
-		// maxColumns))) {
-		// if (particlesInFrame[i].size() > 0)
-		// for (ListIterator k = particlesInFrame[i].listIterator(); k.hasNext() &&
-		// !particleFound;) {
-		// particle particle = (particle) k.next();
-		// if (particle.trackNum == trackNum) {
-		// particleFound = true;
-		// if (particle.flag)
-		// flag = 1;
-		// else
-		// flag = 0;
-		// if (rawData == 3) {
-		// rrt.addValue("Area" + listTrackNum, (float) particle.area);
-		// rrt.addValue("Perimeter" + listTrackNum, (float) particle.perimeter);
-		// rrt.addValue("Distance" + listTrackNum, (float) particle.dist);
-		// } else if (rawData == 4) {
-		// rrt.addValue("Major" + listTrackNum, (float) particle.major);
-		// rrt.addValue("Minor" + listTrackNum, (float) particle.minor);
-		// rrt.addValue("Circularity" + listTrackNum, (float) particle.circularity);
-		// } else if (rawData == 5) {
-		// rrt.addValue("Shape" + listTrackNum, (float) angles[listTrackNum][i]);
-		// rrt.addValue("RateOfChange" + listTrackNum, (float)
-		// dAngles[listTrackNum][i]);
-		// rrt.addValue("SumOfChange" + listTrackNum, (float)
-		// sumDAngles[listTrackNum][i]);
-		// } else if (rawData == 6) {
-		// rrt.addValue("X" + listTrackNum, (float) particle.x);
-		// rrt.addValue("Y" + listTrackNum, (float) particle.y);
-		// rrt.addValue("Area" + listTrackNum, (float) particle.area);
-		// rrt.addValue("Perim" + listTrackNum, (float) particle.perimeter);
-		// rrt.addValue("Angle" + listTrackNum, (float) particle.angle);
-		// rrt.addValue("AR" + listTrackNum, (float) particle.ar);
-		// rrt.addValue("Flag" + listTrackNum, flag);// particle.flag);
-		// } else if (rawData == 2) {
-		// rrt.addValue("Major" + listTrackNum, (float) particle.major);
-		// rrt.addValue("Minor" + listTrackNum, (float) particle.minor);
-		// rrt.addValue("Angle" + listTrackNum, (float) particle.angle);
-		// } else {
-		// rrt.addValue("X" + listTrackNum, (float) particle.x);
-		// rrt.addValue("Y" + listTrackNum, (float) particle.y);
-		// rrt.addValue("Flag" + listTrackNum, (int) flag);// particle.flag);
-		// }
-		// }
-		// }
-		// }
-		// }
-		// }
-		// }
-		// rrt.show(stLine);
-		// }
-		// }
-		// and now when we write to file
-		// if (writefile && (rawData > 0)) {
-		// try {
-
-		// File outputfile = new File(directory, filename.substring(0, filename.length()
-		// - 4) + "_raw.txt");
-
-		// // File outputfile=new File (directory,filename);
-
-		// BufferedWriter dos = new BufferedWriter(new FileWriter(outputfile, true));
-		// if (!suppressHeader) {
-		// dos.write(strHeadings);
-		// dos.newLine();
-		// }
-		// for (int j = 1; j <= repeat; j++) {
-		// int to = j * maxColumns;
-		// if (to > trackCount - 1)
-		// to = trackCount - 1;
-		// String stLine = "Tracks " + ((j - 1) * maxColumns + 1) + " to " + to;
-		// if (!suppressHeader) {
-		// dos.write(stLine);
-		// dos.newLine();
-		// }
-		// for (int i = 0; i <= (nFrames - 1); i++) {
-		// String strLine = "" + (i + 1);
-		// int trackNum = 0;
-		// int listTrackNum = 0;
-		// for (ListIterator iT = tracks.listIterator(); iT.hasNext();) {
-		// trackNum++;
-		// List bTrack = (ArrayList) iT.next();
-		// boolean particleFound = false;
-		// if (bTrack.size() >= minTrackLength) {
-		// listTrackNum++;
-		// if ((listTrackNum > ((j - 1) * maxColumns)) && (listTrackNum <= (j *
-		// maxColumns))) {
-		// for (ListIterator k = particlesInFrame[i].listIterator(); k.hasNext() &&
-		// !particleFound;) {
-		// particle particle = (particle) k.next();
-		// if (particle.trackNum == trackNum) {
-		// particleFound = true;
-		// if (particle.flag)
-		// flags = "*";
-		// else
-		// flags = " ";
-		// if (rawData == 3) {
-		// strLine += "\t" + particle.area + "\t" + particle.perimeter + "\t" +
-		// particle.dist;
-		// } else if (rawData == 5) {
-		// strLine += "\t" + angles[listTrackNum][i] + "\t" + dAngles[listTrackNum][i] +
-		// "\t"
-		// + sumDAngles[listTrackNum][i];
-		// } else if (rawData == 6) {
-		// strLine += "\t" + particle.x + "\t" + particle.y + "\t" + particle.area +
-		// "\t"
-		// + particle.perimeter + "\t" + particle.angle + "\t" + particle.ar + "\t" +
-		// flags;
-		// } else if (rawData == 4) {
-		// strLine += "\t" + particle.major + "\t" + particle.minor + "\t" +
-		// particle.circularity;
-		// } else if (rawData == 2) {
-		// strLine += "\t" + particle.major + "\t" + particle.minor + "\t" +
-		// particle.angle;
-		// } else {
-		// strLine += "\t" + particle.x + "\t" + particle.y + "\t" + flags;
-
-		// }
-		// }
-		// }
-		// if (!particleFound)
-		// strLine += "\t\t\t";
-		// }
-		// }
-		// }
-		// dos.write(strLine);
-		// dos.newLine();
-		// }
-		// }
-
-		// dos.newLine();
-		// dos.close();
-		// } catch (IOException e) {
-		// if (filename != null)
-		// IJ.error("An error occurred writing the file. \n \n " + e);
-		// }
-		// }
-
 		// Now do the fancy stuff when requested:
 
 		// makes a new stack with objects labeled with track nr
@@ -1468,9 +1251,10 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 				// hack to only show tracks longerthan minTrackLength
 				int trackNum = 0;
 				int displayTrackNum = 0;
-				for (ListIterator iT = tracks.listIterator(); iT.hasNext();) {
+				for (ListIterator<Track> iT = tracks.listIterator(); iT.hasNext();) {
+					Track track = iT.next();
+					List bTrack = track.particles;
 					trackNum++;
-					List bTrack = (ArrayList) iT.next();
 					if (bTrack.size() >= minTrackLength) {
 						displayTrackNum++;
 						for (ListIterator k = particlesInFrame[i].listIterator(); k.hasNext();) {
@@ -1517,38 +1301,18 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			imp.show();
 			nimp.updateAndDraw();
 		}
-
-		// 'map' of tracks
-		// IJ.showStatus("Generating map of tracks...");
-		// if (bShowPaths) {
-		// ip = new ByteProcessor(imp.getWidth(), imp.getHeight());
-		// ip.setColor(Color.white);
-		// ip.fill();
-		// trackCount = 0;
-		// int color;
-		// for (ListIterator iT = tracks.listIterator(); iT.hasNext();) {
-		// List bTrack = (ArrayList) iT.next();
-		// if (bTrack.size() >= minTrackLength) {
-		// trackCount++;
-		// ListIterator jT = bTrack.listIterator();
-		// particle oldParticle = (particle) jT.next();
-		// for (; jT.hasNext();) {
-		// particle newParticle = (particle) jT.next();
-		// color = Math.min(trackCount + 1, 254);
-		// ip.setValue(color);
-		// ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y /
-		// pixelHeight));
-		// ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y /
-		// pixelHeight));
-		// oldParticle = newParticle;
-		// }
-		// }
-		// }
-		// new ImagePlus("Paths", ip).show();
-		// }
 	}
 
 	// Utility functions
+
+	List<Track> getTracksStartedInFrame(List<Track> tracks, int frame) {
+		List<Track> out = new ArrayList<>();
+		for (Track track : tracks) {
+			if (track.startFrame == frame)
+				out.add(track);
+		}
+		return out;
+	}
 
 	particle getBestCandidate(List<particle> candidates, List<Float> distances) {
 		particle best = null;
