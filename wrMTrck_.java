@@ -93,6 +93,9 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 	static float minAngle = 2;
 	static float binSize = 0;
 	static int plotBendTrack = 0;
+	static int expectedObjects = 0;
+	static float pxPerMillimeter = 7;
+
 	static boolean bSaveResultsFile = false;
 	static boolean bShowLabels = true;
 	static boolean bShowPositions = true;
@@ -177,6 +180,11 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		int startFrame;
 		int endFrame;
 		float distance;
+		public String color;
+		public float meanArea;
+		public float startToEnd;
+		public float meanPxPerSec;
+		public float meanMillimetersPerSec;
 
 		public int length() {
 			return (this.endFrame - this.startFrame);
@@ -204,7 +212,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 
 	public void run(ImageProcessor ip) {
 
-		GenericDialog gd = new GenericDialog("wrMTrck by Jesper S. Pedersen, " + buildNo);
+		GenericDialog gd = new GenericDialog("wrMTrck by Jesper S. Pedersen, modified by era");
 		gd.addNumericField("minSize - Minimum Object Area (pixels^2): ", minSize, 0);
 		gd.addNumericField("maxSize - Maximum Object Area (pixels^2): ", maxSize, 0);
 		gd.addNumericField("maxVelocity - Maximum Velocity (pixels/frame):", maxVelocity, 0);
@@ -227,6 +235,10 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		gd.addNumericField("backSub - On-the-fly background subtraction (0=off,1=F1RB15):", backSub, 0);
 		gd.addChoice("threshMode - Thresholding method (only if backSub>0)", AutoThresholder.getMethods(), "Otsu");
 		gd.addNumericField("fontSize - Size of labeling font:", fontSize, 0);
+		gd.addNumericField("Maximum stitch distance", 25);
+		gd.addNumericField("# of frames in between samples (e.g. 30 = one sample per second)", 30);
+		gd.addNumericField("# of objects (0 = unknown)", 5);
+		gd.addNumericField("pixels per mm", 7);
 		gd.showDialog();
 		if (gd.wasCanceled())
 			return;
@@ -252,6 +264,10 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		backSub = (int) gd.getNextNumber();
 		threshMode = gd.getNextChoice();
 		fontSize = (int) gd.getNextNumber();
+		int maxStitchDistance = (int) gd.getNextNumber();
+		int framesPerSample = (int) gd.getNextNumber();
+		expectedObjects = (int) gd.getNextNumber();
+		pxPerMillimeter = (float) gd.getNextNumber();
 		if (bShowPositions)
 			bShowLabels = true;
 
@@ -275,12 +291,13 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		if (done)
 			return;
 
-		track(imp, minSize, maxSize, maxVelocity, directory, filename);
+		track(imp, minSize, maxSize, maxVelocity, directory, filename, maxStitchDistance, framesPerSample);
 	}
 
 	@SuppressWarnings({ "deprecation", "rawtypes", "unchecked" })
-	public void track(ImagePlus imp, int minSize, int maxSize, float maxVelocity, String directory, String filename) {
-		verbose = true; // Era: For debug
+	public void track(ImagePlus imp, int minSize, int maxSize, float maxVelocity, String directory, String filename,
+			int maxStitchDistance, int framesPerSample) {
+		verbose = true;
 		int nFrames = imp.getStackSize();
 		if (nFrames < 2) {
 			IJ.showMessage("Tracker", "Stack required");
@@ -303,7 +320,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		if (fps <= 0) {
 			fps = cal.fps;
 		}
-		;
 
 		// Get information on the thresholding used
 
@@ -440,8 +456,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 
 		// #region Track Assembly
 
-		// TODO: Fix here
-
 		IJ.showStatus("Assembling tracks");
 		IJ.log("Assembling tracks");
 
@@ -545,8 +559,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			new ImagePlus("All Paths", ip).show();
 		}
 
-		// #region Track Analysis
-		float maxStitchDistance = 25f;
+		// #region Track Stitching
 		IJ.log("Stitching tracks with max dist: " + maxStitchDistance);
 		List<Track> activeTracks = new ArrayList<>();
 		List<Track> lostTracks = new ArrayList<>();
@@ -618,689 +631,97 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		allTracks.addAll(activeTracks);
 		allTracks.addAll(lostTracks);
 
-		// #region Processed tracks
+		// Remove the shortest tracks until we get to the expected number of objects
+		while (expectedObjects > 0 && allTracks.size() > expectedObjects) {
+			int min = 99999;
+			Integer target = null;
+			for (ListIterator<Track> tracksIterator = allTracks.listIterator(); tracksIterator.hasNext();) {
+				Track track = tracksIterator.next();
+				Integer length = track.particles.size();
+				if (length < min) {
+					min = length;
+					target = tracksIterator.previousIndex();
+				}
+			}
+			if (target != null) {
+				allTracks.remove((int) target);
+			}
+		}
+
+		// #region Track analysis
+		double secPerFrame = 1 / fps;
+		double secPerSample = secPerFrame * framesPerSample;
+
 		IJ.showStatus("Generating map of stitched tracks...");
 		IJ.log("Generating map of stitched tracks...");
-		if (bShowPaths) {
-			List<Integer> smoothingLevels = Arrays.asList(1, 10, 30, 60);
-			Iterator<Integer> smoothingIterator = smoothingLevels.iterator();
-			while (smoothingIterator.hasNext()) {
-				Integer smoothing = smoothingIterator.next();
-				IJ.log("Using smoothing level: " + smoothing);
-				ip = new ColorProcessor(imp.getWidth(), imp.getHeight());
-				ip.setColor(Color.white);
-				ip.fill();
-				String[] colors = { "red", "blue", "green", "orange" };
-				int i = 0;
-				for (ListIterator<Track> tracksIterator = allTracks.listIterator(); tracksIterator.hasNext();) {
-					Track track = tracksIterator.next();
-					track.distance = 0f;
-					IJ.log("Track length: " + track.length());
-					ListIterator<particle> particleIterator = track.particles.listIterator();
-					particle oldParticle = particleIterator.next();
-					ip.setColor(colors[i % colors.length]);
-					int j = 1; // Start at 1 bc of the initial set
-					while (particleIterator.hasNext()) {
-						particle newParticle = particleIterator.next();
-						if ((j % smoothing) == 0) {
-							track.distance += oldParticle.distance(newParticle);
-							ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y / pixelHeight));
-							ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
-							oldParticle = newParticle;
-						}
-						j++;
-					}
-					particle first = track.particles.get(0);
-					float offset = 10f;
-					ip.drawString("Track Distance: " + track.distance, Math.round(first.x + offset),
-							Math.round(first.y + offset));
-					i++;
-				}
-				new ImagePlus("Stitch distance: " + maxStitchDistance + ", Smoothing: " + smoothing, ip).show();
-			}
-		}
-
-		if (bShowLabels) {
-			// ImageStack newStack = imp.createEmptyStack();
-			// int yWidth = newStack.getWidth();
-			// for (int i = 0; i <= (nFrames - 1); i++) {
-			// if (IJ.escapePressed()) {
-			// IJ.beep();
-			// done = true;
-			// return;
-			// }
-			// int iFrame = i + 1;
-			// ImageProcessor imgProcessor = stack.getProcessor(iFrame);
-			// newStack.addSlice(stack.getSliceLabel(iFrame), imgProcessor.crop());
-			// ImageProcessor newImgProcessor = newStack.getProcessor(iFrame);
-			// newImgProcessor.setFont(new Font("SansSerif", Font.PLAIN, fontSize));
-			// newImgProcessor.setColor(Color.pink);
-
-			// Iterator<Track> trackIterator = allTracks.iterator();
-			// while (trackIterator.hasNext()) {
-			// Track track = trackIterator.next();
-
-			// }
-			// IJ.showProgress((double) iFrame / nFrames);
-			// }
-			// ImagePlus nimp = new ImagePlus(imp.getTitle() + " labels", newStack);
-			// nimp.setCalibration(imp.getCalibration());
-			// nimp.show();
-			// imp.show();
-			// nimp.updateAndDraw();
-		}
-
-		// TODO: era end
-
-		// Initiate the writing of an output textfile if a filename is given.
-
-		boolean writefile = false;
-		if (filename != null) {
-			File outputfile = new File(directory, filename);
-			if (!outputfile.canWrite()) {
-				try {
-					outputfile.createNewFile();
-				} catch (IOException e) {
-					IJ.showMessage("Error", "Could not create " + directory + filename);
-				}
-			}
-			if (outputfile.canWrite())
-				writefile = true;
-			else
-				IJ.showMessage("Error", "Could not write to " + directory + filename);
-		}
-
-		// Calculate length of paths, area of objects and number of body bends
-
-		double[][] angles = new double[trackCount + 1][nFrames];
-		double[][] dAngles = new double[trackCount + 1][nFrames];
-		double[][] sumDAngles = new double[trackCount + 1][nFrames];
-		double[][] bendCounter = new double[trackCount + 1][nFrames];
-		double[][] dAAreas = new double[trackCount + 1][nFrames];
-		double[] times = new double[nFrames];
-		double[][] bendTimes = new double[trackCount + 1][nFrames];
-		double[] rawX = new double[nFrames + 2];
-		double[] rawY = new double[nFrames + 2];
-		double[] smoothX = new double[nFrames + 2];
-		double[] smoothY = new double[nFrames + 2];
-
-		if (bShowPathLengths) {
-			double[] lengths = new double[trackCount];
-			double[] distances = new double[trackCount];
-			double[] maxspeeds = new double[trackCount];
-			double[] areas = new double[trackCount];
-			double[] areaStdev = new double[trackCount];
-			double[] perims = new double[trackCount];
-			double[] perimsStdev = new double[trackCount];
-			double[] bends = new double[trackCount];
-			double[] avgX = new double[trackCount];
-			double[] avgY = new double[trackCount];
-			int[] frames = new int[trackCount];
-			int[] firstFrames = new int[trackCount];
-			int binNum = 0;
-
-			if (binSize > 0)
-				binNum = (int) (maxVelocity / binSize + 1);
-			else
-				binNum = 100;
-
-			/* double x1, y1, x2, y2, */
-			double distance, deltaAngle, oldAngle, sumDAngle, oldDAngle1, temp, temp2, avgArea, sumAreaSq,
-					avgPerim, sumPerimSq, sumX, sumY;
-
-			// generate smoothed coordinates to eliminate some digital noise -
-			// without coordinate smoothing length of track for immobile particles can
-			// actually be quite long
-			// for now only 5-point smoothing is possible, but the number of points should
-			// be user definable in later releases
-
-			if (bSmoothing) {
-				IJ.showStatus("Smoothing tracks...");
-				IJ.log("Smoothing tracks...");
-				for (ListIterator<Track> iT = tracks.listIterator(); iT.hasNext();) {
-					Track track = iT.next();
-					List bTrack = track.particles;
-					if (bTrack.size() >= minTrackLength) {
-						ListIterator jT = bTrack.listIterator();
-						particle oldParticle = (particle) jT.next();
-						particle oldParticle2 = oldParticle;
-						rawX[1] = oldParticle.x;
-						rawY[1] = oldParticle.y;
-						smoothX[1] = oldParticle.x;
-						smoothY[1] = oldParticle.y;
-						oldParticle.sx = oldParticle.x;
-						oldParticle.sy = oldParticle.y;
-						int i = 1;
-						int t = 0;
-						for (; jT.hasNext();) {
-							i++;
-							particle newParticle = (particle) jT.next();
-							rawX[i] = newParticle.x;
-							rawY[i] = newParticle.y;
-							newParticle.sx = newParticle.x;
-							newParticle.sy = newParticle.y;
-							smoothX[i] = newParticle.x;
-							smoothY[i] = newParticle.y;
-							if (i >= 3) {
-								temp = 0;
-								temp2 = 0;
-								for (t = 0; t < 3; t++) {
-									temp += rawX[t + i - 2];
-									temp2 += rawY[t + i - 2];
-								}
-								smoothX[i - 1] = (float) temp / 3;
-								smoothY[i - 1] = (float) temp2 / 3;
-								oldParticle.sx = (float) temp / 3;
-								oldParticle.sy = (float) temp2 / 3;
-
-							}
-							if (i >= 5) {
-								temp = 0;
-								temp2 = 0;
-								for (t = 0; t < 5; t++) {
-									temp += rawX[t + i - 4];
-									temp2 += rawY[t + i - 4];
-								}
-								smoothX[i - 2] = (float) temp / 5;
-								smoothY[i - 2] = (float) temp2 / 5;
-								oldParticle2.sx = (float) temp / 5;
-								oldParticle2.sy = (float) temp2 / 5;
-
-							} else {
-							}
-							oldParticle2 = oldParticle;
-							oldParticle = newParticle;
-						}
-					}
-				}
-			}
-
-			int[][] bins = new int[trackCount][(int) binNum]; // used to store speed histograms
-			int[][] bBins = new int[trackCount][101]; // used to store bend-histograms
-			int[] FrameTrackCount = new int[nFrames]; // store how many objects are tracked in each frame
-
-			// analyze tracks
-			// Discard tracks that are smaller than minTrackLength
-			// Calculate length of track
-			// Calculate bends
-			// Calculate how many animals are tracked on each frame
-
-			IJ.showStatus("Analyzing tracks...");
-			IJ.log("Analyzing tracks...");
-
-			int displayTrackNum = 0;
-			int bendCount = 0;
-			int oldBendFrame = 0;
-			for (ListIterator<Track> iT = tracks.listIterator(); iT.hasNext();) {
-				Track track = iT.next();
-				List bTrack = track.particles;
-
-				if (bTrack.size() < minTrackLength)
-					continue;
-
-				displayTrackNum++;
-				maxspeeds[displayTrackNum - 1] = 0;
-				ListIterator jT = bTrack.listIterator();
-				particle oldParticle = (particle) jT.next();
-				particle firstParticle = new particle();
-				FrameTrackCount[firstParticle.z]++;
-				firstParticle.copy(oldParticle);
-
-				avgArea = oldParticle.area;
-				avgPerim = oldParticle.perimeter;
-				sumPerimSq = 0;
-				sumAreaSq = 0;
-				sumX = oldParticle.x;
-				sumY = oldParticle.y;
-				firstFrames[displayTrackNum - 1] = oldParticle.z;
-				oldAngle = sumDAngle = oldDAngle1 = 0;
-
-				if (bendType == 1)
-					oldAngle = oldParticle.angle;
-				if (bendType > 1)
-					oldAngle = oldParticle.ar;
-				angles[displayTrackNum][0] = oldAngle;
-				bendCount = 0;
-				int i = 1;
-				sumDAngle = oldDAngle1 = 0;
-				frames[displayTrackNum - 1] = bTrack.size();
-
-				for (; jT.hasNext();) {
-					i++;
-					particle newParticle = (particle) jT.next();
-					FrameTrackCount[newParticle.z]++; // add one object to FrameCount at the given frame
-					if (bSmoothing) {
-						distance = newParticle.sdistance(oldParticle);
-					} else
-						distance = newParticle.distance(oldParticle);
-
-					// Calculate average and standard deviation of object area
-					temp = (avgArea + (newParticle.area - avgArea) / i);
-					sumAreaSq += (newParticle.area - avgArea) * (newParticle.area - temp);
-					avgArea = temp;
-
-					// Calculate average and standard deviation of object perimeter
-					temp = (avgPerim + (newParticle.perimeter - avgPerim) / i);
-					sumPerimSq += (newParticle.perimeter - avgPerim) * (newParticle.perimeter - temp);
-					avgPerim = temp;
-
-					// Calculate the average position of the animals - e.g. useful if a single movie
-					// cointains for seprate wells
-					sumX += newParticle.x;
-					sumY += newParticle.y;
-
-					if (bendType > 0) {
-
-						// detect wobbling of particle or bending of objects
-
-						if (bendType == 1) {
-							// use the angle of the ellipse for the fitting
-							deltaAngle = newParticle.angle - oldAngle;
-							oldAngle = newParticle.angle;
-
-							if (deltaAngle > 100) {
-								deltaAngle = deltaAngle - 180;
-							}
-							; // motion probably transverse 0-180 degree boundery
-							if (deltaAngle < -100) {
-								deltaAngle = deltaAngle + 180;
-							}
-							; // ....
-
-						} else if (bendType > 1) {
-							// use the aspect ratio of the ellipse for counting body-bends
-							deltaAngle = newParticle.ar - oldAngle;
-							oldAngle = newParticle.ar;
-						} else
-							deltaAngle = 0;
-						angles[displayTrackNum][newParticle.z] = oldAngle;
-
-						if (oldDAngle1 * deltaAngle <= 0) {
-							// A change in sign indicates object started turning the other direction
-							if (sumDAngle > minAngle) {
-								// if area of last turn angle was over threshold degrees then count as a bend.
-								binNum = newParticle.z - oldBendFrame;
-								// IJ.log("binNum:"+binNum);
-								if (binNum < 1)
-									binNum = newParticle.z;
-								if (binNum > 100)
-									binNum = 100;
-								bBins[displayTrackNum - 1][binNum]++;
-								dAAreas[displayTrackNum][bendCount] = sumDAngle;
-								bendTimes[displayTrackNum][bendCount] = newParticle.z;
-								bendCount++;
-								oldBendFrame = newParticle.z;
-							}
-							;
-							sumDAngle = deltaAngle; // start summing new motion
-						} else {
-							sumDAngle += deltaAngle;
-						}
-						bendCounter[displayTrackNum][newParticle.z] = bendCount;
-						sumDAngles[displayTrackNum][newParticle.z] = sumDAngle;
-
-						oldDAngle1 = deltaAngle;
-
-						dAngles[displayTrackNum][newParticle.z] = deltaAngle;
-						times[newParticle.z] = newParticle.z;
-
-					}
-					// Generate a speed histogram
-					if (!(newParticle.flag || oldParticle.flag)) { // only accecpt maximum speeds for non-flagged particles
-						if (binSize > 0) {
-							int binNr = (int) (distance / pixelWidth / binSize);
-							bins[displayTrackNum - 1][binNr]++;
-						}
-						if (distance > maxspeeds[displayTrackNum - 1]) {
-							maxspeeds[displayTrackNum - 1] = distance;
-						}
-						;
-					}
-					lengths[displayTrackNum - 1] += distance;
+		Integer smoothing = framesPerSample;
+		IJ.log("Using smoothing level: " + smoothing);
+		ip = new ColorProcessor(imp.getWidth(), imp.getHeight());
+		ip.setColor(Color.white);
+		ip.fill();
+		String[] colors = { "red", "blue", "green", "orange", "cyan", "pink" };
+		int i = 0;
+		for (ListIterator<Track> tracksIterator = allTracks.listIterator(); tracksIterator.hasNext();) {
+			Track track = tracksIterator.next();
+			track.distance = 0f;
+			float totalArea = 0f;
+			float totalPxPerSec = 0f;
+			IJ.log("Track length: " + track.length());
+			ListIterator<particle> particleIterator = track.particles.listIterator();
+			particle oldParticle = particleIterator.next();
+			String color = colors[i % colors.length];
+			track.color = color;
+			ip.setColor(color);
+			int j = 1; // Start at 1 bc of the initial set
+			while (particleIterator.hasNext()) {
+				particle newParticle = particleIterator.next();
+				if ((j % smoothing) == 0) {
+					totalArea += newParticle.area;
+					float distance = oldParticle.distance(newParticle);
+					float pxPerSec = distance / (float) secPerSample;
+					totalPxPerSec += pxPerSec;
+					track.distance += distance;
+					ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y / pixelHeight));
+					ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
 					oldParticle = newParticle;
 				}
-				distances[displayTrackNum - 1] = oldParticle.distance(firstParticle);// Math.sqrt(sqr(oldParticle.x-firstParticle.x)+sqr(oldParticle.y-firstParticle.y));
-				areas[displayTrackNum - 1] = avgArea;
-				areaStdev[displayTrackNum - 1] = Math.sqrt(sumAreaSq / (bTrack.size() - 1)); // Calculate Stdev of the areas
-				perims[displayTrackNum - 1] = avgPerim;
-				perimsStdev[displayTrackNum - 1] = Math.sqrt(sumPerimSq / (bTrack.size() - 1)); // Calculate the Stdev of the
-																																												// perimeters
-				avgX[displayTrackNum - 1] = sumX / bTrack.size();
-				avgY[displayTrackNum - 1] = sumY / bTrack.size();
-
-				if (bendType == 1)
-					bends[displayTrackNum - 1] = (float) bendCount;
-				else if (bendType > 1)
-					bends[displayTrackNum - 1] = (float) bendCount / 2;
+				j++;
 			}
+			track.meanArea = totalArea / (track.particles.size() / smoothing);
+			track.meanPxPerSec = totalPxPerSec / (track.particles.size() / smoothing);
+			track.meanMillimetersPerSec = track.meanPxPerSec / pxPerMillimeter;
+			particle first = track.particles.get(0);
+			particle last = track.particles.get(track.particles.size() - 1);
 
-			if (writefile) {
-				try {
-					File outputfile = new File(directory, filename);
-					BufferedWriter dos = new BufferedWriter(new FileWriter(outputfile)); // append
-					if (bendType > 0) {
-						dos.write(
-								"Track \tLength\tDistance\t#Frames\t1stFrame\ttime(s)\tMaxSpeed\tAvgArea\tStdArea\tAvgPerim\tStdPerim\tAvgSpeed\tBLPS\tavgX\tavgX\tBends\tBBPS\tTEST");
-					} else {
-						dos.write(
-								"Track \tLength\tDistance\t#Frames\t1stFrame\ttime(s)\tMaxSpeed\tAvgArea\tStdArea\tAvgPerim\tStdPerim\tAvgSpeed\tBLPS\tavgX\tavgX");
-					}
+			// Draw start and end points
+			ip.drawRect(Math.round(first.x), Math.round(first.y), 8, 8);
+			ip.drawRect(Math.round(last.x), Math.round(last.y), 3, 3);
 
-					dos.newLine();
-					for (int i = 0; i < displayTrackNum; i++) {
-						String str = "" + (i + 1) + "\t" + (float) lengths[i] + "\t"
-								+ (float) distances[i] + "\t"
-								+ (int) frames[i] + "\t"
-								+ (int) firstFrames[i] + "\t"
-								+ (float) (frames[i] / fps) + "\t"
-								+ (float) fps * maxspeeds[i] + "\t"
-								+ (float) areas[i] + "\t"
-								+ (float) areaStdev[i] + "\t"
-								+ (float) perims[i] + "\t"
-								+ (float) perimsStdev[i] + "\t"
-								+ (float) (fps * lengths[i] / frames[i]) + "\t"
-								+ (float) (fps * 2 * lengths[i] / perims[i] / frames[i]) + "\t"
-								+ (float) avgX[i] + "\t"
-								+ (float) avgY[i];
+			track.startToEnd = first.distance(last);
 
-						if (bendType > 0) {
-							str += "\t"
-									+ (float) bends[i] + "\t"
-									+ (float) fps * bends[i] / frames[i];
-						}
+			// Label the track
+			float labelOffset = 10f;
+			ip.drawString(track.distance + "", Math.round(first.x + labelOffset),
+					Math.round(first.y + labelOffset));
+			i++;
+		}
+		new ImagePlus("Stitch distance: " + maxStitchDistance + ", Smoothing: " + smoothing, ip).show();
 
-						dos.write(str);
-						dos.newLine();
-					}
-					if (binSize > 0) {
-						dos.newLine();
-						dos.write("Bin\t");
-						for (int t = 0; t < displayTrackNum; t++) {
-							dos.write("T#" + (int) (t + 1) + "\t");
-						}
-						;
-						dos.newLine();
+		// #Displaying output table
+		ResultsTable mrt = ResultsTable.getResultsTable();
+		mrt.reset();
 
-						for (int i = 0; i < (int) (maxVelocity / binSize); i++) {
-							String str = "" + (float) i * binSize + "\t";
-							for (int t = 0; t < displayTrackNum; t++) {
-								str = str + bins[t][i] + "\t";
-							}
-							;
-							dos.write(str);
-							dos.newLine();
-						}
-					}
-					if (bendType > 2) {
-						dos.newLine();
-						String str = "Bin";
-						for (int t = 0; t < displayTrackNum; t++) {
-							str = str + ("\tTrack" + (int) (t + 1));
-						}
-						;
-						dos.write(str);
-						dos.newLine();
-						for (int i = 0; i < 101; i++) {
-							str = "" + (float) i;
-							for (int t = 0; t < displayTrackNum; t++) {
-								str += "\t" + bBins[t][i];
-							}
-							;
-							dos.write(str);
-							dos.newLine();
-						}
-
-					}
-					dos.close();
-				} catch (IOException e) {
-					if (filename != null)
-						IJ.error("An error occurred writing the file. \n \n " + e);
-				}
-
-			} else {
-				ResultsTable mrt = ResultsTable.getResultsTable();
-				mrt.reset();
-
-				for (int i = 0; i < displayTrackNum; i++) {
-					mrt.incrementCounter();
-					mrt.addValue("Track", (i + 1));
-					mrt.addValue("Length", (float) lengths[i]);
-					mrt.addValue("Distance", (float) distances[i]);
-					mrt.addValue("#Frames", (float) frames[i]);
-					mrt.addValue("1stFrame", (float) firstFrames[i]);
-					mrt.addValue("Time(s)", (float) frames[i] / fps);
-					mrt.addValue("MaxSpeed", (float) fps * maxspeeds[i]);
-					mrt.addValue("Area", (float) areas[i]);
-					mrt.addValue("sdArea", (float) areaStdev[i]);
-					mrt.addValue("Perim", (float) perims[i]);
-					mrt.addValue("sdPerim", (float) perimsStdev[i]);
-					mrt.addValue("avgSpeed", (float) (fps * lengths[i] / frames[i]));
-					mrt.addValue("BLPS", (float) (fps * 2 * lengths[i] / perims[i] / frames[i]));
-					mrt.addValue("avgX", (float) avgX[i]);
-					mrt.addValue("avgY", (float) avgY[i]);
-					if (bendType > 0) {
-						mrt.addValue("Bends", (float) bends[i]);
-						mrt.addValue("BBPS", (float) fps * bends[i] / frames[i]);
-						mrt.addValue("TEST", "t");
-					}
-				}
-				mrt.show("Results");
-
-				if (binSize > 0) {
-
-					// Write histogram for individual track in the movie
-					IJ.write("");
-					String str = "Bin\t";
-					for (int t = 0; t < displayTrackNum; t++) {
-						str = str + ("Track" + (int) (t + 1) + "\t");
-					}
-					;
-					str = str + "\n";
-					IJ.write(str);
-
-					for (int i = 0; i < (int) (maxVelocity / binSize); i++) {
-						str = "" + (float) i * binSize + "\t";
-						for (int t = 0; t < displayTrackNum; t++) {
-							str = str + bins[t][i] + "\t";
-						}
-						;
-						IJ.write(str + "\n");
-
-					}
-				}
-				// thrashing histogram
-				if (bendType > 2) {
-					IJ.write("");
-					String str = "#Frames";
-					for (int t = 0; t < displayTrackNum; t++) {
-						str = str + ("\tTrack" + (int) (t + 1));
-					}
-					;
-					IJ.write(str + "\n");
-					for (int i = 0; i < 101; i++) {
-						str = "" + (float) i;
-						for (int t = 0; t < displayTrackNum; t++) {
-							str += "\t" + bBins[t][i];
-						}
-						;
-						IJ.write(str /* +(int)mySum */ + "\n");
-					}
-
-				}
-
-			}
-			// summarize the speed histogram for the movie
-
-			// Generate summarized output
-			// filename,N,nTracks,TotLength,totFrames,TotTime,AvgSpeed,AvgArea,AvgPerim,StdSpeed,StdArea,StdPerim
-			if (bShowSummary) {
-				float sumLengths = 0;
-				float sumFrames = 0;
-				avgArea = 0;
-				sumAreaSq = 0;
-				avgPerim = 0;
-				sumPerimSq = 0;
-				double avgSpeed = 0;
-				double sumSpeedSq = 0;
-				double speed = 0;
-				double sumBends = 0;
-				double avgBBPS = 0;
-				double sumBBPSSq = 0;
-				double BBPS = 0;
-
-				for (int i = 0; i < displayTrackNum; i++) {
-					sumLengths += lengths[i];
-					sumFrames += frames[i];
-					sumBends += bends[i];
-
-					// Calculate average and standard deviation of object area
-					temp = (avgArea + (areas[i] - avgArea) / (i + 1));
-					sumAreaSq += (areas[i] - avgArea) * (areas[i] - temp);
-					avgArea = temp;
-
-					// Calculate average and standard deviation of object perimeter
-					temp = (avgPerim + (perims[i] - avgPerim) / (i + 1));
-					sumPerimSq += (perims[i] - avgPerim) * (perims[i] - temp);
-					avgPerim = temp;
-
-					// Calculate average and standard deviation of object Speed
-					speed = lengths[i] / (frames[i] / fps);
-					temp = (avgSpeed + (speed - avgSpeed) / (i + 1));
-					sumSpeedSq += (speed - avgSpeed) * (speed - temp);
-					avgSpeed = temp;
-
-					// Calculate average and standard deviation of BodyBends per seconds
-					BBPS = bends[i] / (frames[i] / fps);
-					temp = (avgBBPS + (BBPS - avgBBPS) / (i + 1));
-					sumBBPSSq += (BBPS - avgBBPS) * (BBPS - temp);
-					avgBBPS = temp;
-
-				}
-				String aLine = null;
-				summaryHdr = "File\tnObjMax\tnObjMaxFrm\tnObjMin\tnObjMinFrm\tkpMax\tkpMaxFrm\tnFrames\tnTracks\ttotLength\tObjFrames\tObjSeconds\tavgSpeed\tavgArea\tavgPerim\tstdSpeed\tstdArea\tstdPerim";
-				if (bendType > 0)
-					summaryHdr += "\tBends\tavgBBPS\tstdBBPS";
-
-				aLine = rawFilename + "\t" + (int) nMax // number of objects (N-value)
-						+ "\t" + (int) nMaxFrm // frame at nMax (KP)
-						+ "\t" + (int) nMin // nMin (KP)
-						+ "\t" + (int) nMinFrm // frame at nMin (KP)
-						+ "\t" + (int) kpMax // kpMax objects (KP)
-						+ "\t" + (int) kpFrm // frame at kpMax objects (KP)
-						+ "\t" + (int) nFrames // number of frames
-						+ "\t" + (int) displayTrackNum // number of tracks
-						+ "\t" + (float) sumLengths // total distance covered by all objects
-						+ "\t" + (float) sumFrames // total number of object*frames
-						+ "\t" + (float) sumFrames / fps // total obj*seconds
-						+ "\t" + (float) avgSpeed // average speed (pixels/seconds)
-						+ "\t" + (float) avgArea // average worm area
-						+ "\t" + (float) avgPerim // average worm perimeter
-						+ "\t" + (float) Math.sqrt(sumSpeedSq / (displayTrackNum - 1))// average speed (pixels/seconds)
-						+ "\t" + (float) Math.sqrt(sumAreaSq / (displayTrackNum - 1))// average worm area
-						+ "\t" + (float) Math.sqrt(sumPerimSq / (displayTrackNum - 1)) // average worm perimeter
-				;
-				if (bendType > 0) {
-					aLine += "\t" + (float) sumBends // total number of body bends in the movie
-							+ "\t" + (float) avgBBPS // average BBPS per track
-							+ "\t" + (float) Math.sqrt(sumBBPSSq / (displayTrackNum - 1)) // standard deviation of BBPS per track
-					;
-
-				}
-
-				// IJ.log(aLine+"\n");
-				Frame frame = WindowManager.getFrame("Summary");
-				if (frame != null && (frame instanceof TextWindow) && summaryHdr.equals(prevHdr))
-					tw = (TextWindow) frame;
-
-				if (tw == null) {
-					String title = "Summary";
-					tw = new TextWindow(title, summaryHdr, aLine, 450, 300);
-					prevHdr = summaryHdr;
-				} else
-					tw.append(aLine);
-
-			}
+		for (ListIterator<Track> tracksIterator = allTracks.listIterator(); tracksIterator.hasNext();) {
+			mrt.incrementCounter();
+			Track track = tracksIterator.next();
+			mrt.addValue("Colour", track.color);
+			mrt.addValue("Length (mm)", track.distance / pxPerMillimeter);
+			mrt.addValue("Distance from start to end (mm)", track.startToEnd / pxPerMillimeter);
+			mrt.addValue("MeanSpeed (mm/s)", track.meanMillimetersPerSec);
+			mrt.addValue("MeanArea (px)", track.meanArea);
 		}
 
-		// Now do the fancy stuff when requested:
-
-		// makes a new stack with objects labeled with track nr
-		// optionally also displays centroid position
-		IJ.showStatus("Generating movie with labels...");
-
-		if (bShowLabels) {
-			String strPart;
-			ImageStack newstack = imp.createEmptyStack();
-			int yWidth = newstack.getWidth();
-
-			for (int i = 0; i <= (nFrames - 1); i++) {
-				if (IJ.escapePressed()) {
-					IJ.beep();
-					done = true;
-					return;
-				}
-				int iFrame = i + 1;
-				ip = stack.getProcessor(iFrame);
-				newstack.addSlice(stack.getSliceLabel(iFrame), ip.crop());
-				ImageProcessor nip = newstack.getProcessor(iFrame);
-				nip.setColor(Color.pink);
-				// Font f1 = Font.getFont(Font.FACE_SYSTEM, Font.STYLE_PLAIN, Font.SIZE_LARGE);
-				// fontSize
-				nip.setFont(new Font("SansSerif", Font.PLAIN, fontSize));
-				// nip.boldFont = true;
-				// hack to only show tracks longerthan minTrackLength
-				int trackNum = 0;
-				int displayTrackNum = 0;
-				for (ListIterator<Track> iT = tracks.listIterator(); iT.hasNext();) {
-					Track track = iT.next();
-					List bTrack = track.particles;
-					trackNum++;
-					if (bTrack.size() >= minTrackLength) {
-						displayTrackNum++;
-						for (ListIterator k = particlesInFrame[i].listIterator(); k.hasNext();) {
-							particle particle = (particle) k.next();
-							if (particle.trackNum == trackNum) {
-								strPart = "" + displayTrackNum;
-								if (bShowPositions) {
-									// if (bendType==0) strPart += "= "+(int)particle.x+","+(int)particle.y ; //
-									// bend detection not enabled plot coordinates instead
-									if (bendType == 1)
-										strPart += "= b" + bendCounter[displayTrackNum][i];
-									if (bendType > 1)
-										strPart += "= b" + bendCounter[displayTrackNum][i] / 2;
-
-									// we could plot a number of different infos for the particles tracked
-									// {strPart+="="+/*(int)particle.angle+","*/+(int)particle.area+","+(int)particle.x+","+(int)particle.y;}
-									// {strPart+="="+/*(int)particle.angle+","+*/(int)particle.area+","+bendCounter[displayTrackNum][i]/2;
-									// };
-								}
-								// we could do someboundary testing here to place the labels better when we are
-								// close to the edge
-								nip.moveTo((int) (particle.x / pixelWidth + 0),
-										doOffset((int) (particle.y / pixelHeight), yWidth, 5));
-								// nip.moveTo(doOffset((int)particle.x,xHeight,5),doOffset((int)particle.y,yWidth,5)
-								// );
-								nip.drawString(strPart);
-								if (bendType == 1) {
-									nip.setColor(Color.green);
-									double rad = Math.toRadians(particle.angle + 90);
-									nip.moveTo((int) (particle.x / pixelWidth + 20 * Math.sin(rad)),
-											(int) (particle.y / pixelHeight + 20 * Math.cos(rad)));
-									nip.lineTo((int) (particle.x / pixelWidth - 20 * Math.sin(rad)),
-											(int) (particle.y / pixelHeight - 20 * Math.cos(rad)));
-								}
-							}
-						}
-					}
-				}
-				IJ.showProgress((double) iFrame / nFrames);
-			}
-			ImagePlus nimp = new ImagePlus(imp.getTitle() + " labels", newstack);
-			nimp.setCalibration(imp.getCalibration());
-			nimp.show();
-			imp.show();
-			nimp.updateAndDraw();
-		}
+		mrt.show("Results");
 	}
 
 	// Utility functions
