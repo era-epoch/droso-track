@@ -2,16 +2,11 @@
 import ij.plugin.filter.PlugInFilter;
 import java.util.*;
 import java.awt.Color;
-import java.awt.Frame;
-import java.awt.Font;
-import java.io.*;
 
 import ij.*;
 import ij.gui.*;
-import ij.io.*;
 import ij.process.*;
 import ij.measure.*;
-import ij.text.*;
 import ij.plugin.filter.ParticleAnalyzer;
 import ij.plugin.filter.BackgroundSubtracter;
 
@@ -66,17 +61,6 @@ import ij.plugin.filter.BackgroundSubtracter;
  * With rawData <0 headers are suppressed.
  * (Konstantine Palanski) Summary repors frames with maximum and minimum number
  * of objects and the frame with maximum number of tracked objects
- * 
- * TODO
- * (Allow user to provide a thresholded image-stack instead of requiring
- * binary-stack) - done
- * Better support for multicore CPU to speed up analysis (Not sure how much can
- * be gained)
- * Make output of histograms in more user-friendly format
- * Flexible user defineable point smoothing setting instead of hard coded
- * 5-point smoothing
- * 
- * 
  */
 public class wrMTrck_ implements PlugInFilter, Measurements {
 
@@ -96,18 +80,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 	static int expectedObjects = 0;
 	static float pxPerMillimeter = 7;
 
-	static boolean bSaveResultsFile = false;
-	static boolean bShowLabels = true;
-	static boolean bShowPositions = true;
-	static boolean bShowPaths = true;
-	static boolean bShowPathLengths = true;
-	static boolean bShowSummary = true;
-	static boolean bRoundCoord = false;
-	static boolean bSmoothing = true;
-	static boolean bPlotBendTrack = false;
-
 	static int rawData = 0;
-	static int bendType = 2;
 	static double fps = 0;
 	static int backSub = 0;
 	static String threshMode = "Otsu";
@@ -118,20 +91,14 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 	static String row = new String();
 	private int nMax = 0;
 	private int nMin = 99999;
-	private int nMaxFrm = 0;
-	private int nMinFrm = 0;
 	// EOKP
 
-	private TextWindow tw;
 	private String directory, filename, rawFilename;
 
-	private static String prevHdr;
-	private String summaryHdr = "File\tnObj\tnObjFrm\tnFrames\tnTracks\ttotLength\tObjFrames\tObjSeconds\tavgSpeed\tavgArea\tavgPerim\tstdSpeed\tstdArea\tstdPerim"; // (KP)
 	private double pixelWidth = 1.0, pixelHeight = 1.0;
 	boolean done;
 
-	// #region Particle Class TODO:
-
+	// #region Particle Class
 	public class particle {
 		float x;
 		float y;
@@ -175,6 +142,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		}
 	}
 
+	// #region Track class
 	public class Track {
 		List<particle> particles = new ArrayList<particle>();
 		int startFrame;
@@ -199,7 +167,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			return DOES_8G + NO_CHANGES;
 	}
 
-	// ===================================================== max
 	public static double max(double[] t) {
 		double maximum = t[0]; // start with the first value
 		for (int i = 1; i < t.length; i++) {
@@ -208,35 +175,23 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			}
 		}
 		return maximum;
-	}// end method max
+	}
 
+	// #region Run function (wrapper)
 	public void run(ImageProcessor ip) {
-
 		GenericDialog gd = new GenericDialog("wrMTrck by Jesper S. Pedersen, modified by era");
 		gd.addNumericField("minSize - Minimum Object Area (pixels^2): ", minSize, 0);
 		gd.addNumericField("maxSize - Maximum Object Area (pixels^2): ", maxSize, 0);
 		gd.addNumericField("maxVelocity - Maximum Velocity (pixels/frame):", maxVelocity, 0);
 		gd.addNumericField("maxAreaChange - Maximum area change (%):", maxAreaChange, 0);
 		gd.addNumericField("minTrackLength - Minimum track length (frames):", minTrackLength, 0);
-		gd.addNumericField("bendThreshold - Threshold for turn :", minAngle, 1);
-		gd.addNumericField("binSize - Size of bin for speed histogram (pixels/frame) (0=disable):", binSize, 1);
-		gd.addCheckbox("saveResultsFile - Save Results File:", bSaveResultsFile);
-		gd.addCheckbox("showPathLengths - Display Path Lengths:", bShowPathLengths);
-		gd.addCheckbox("showLabels - Show Labels:", bShowLabels);
-		gd.addCheckbox("showPositions - Show Positions:", bShowPositions);
-		gd.addCheckbox("showPaths - Show Paths:", bShowPaths);
-		gd.addCheckbox("showSummary - show a summary of tracking", bShowSummary);
-		gd.addCheckbox("roundCoord - round off coordinates", bRoundCoord);
-		gd.addCheckbox("smoothing - point smoothing", bSmoothing);
-		gd.addCheckbox("plotBendTrack - Quality control plots for thrashing analysis", bPlotBendTrack);
 		gd.addNumericField("rawData - (0=off,1=XYcord,2=Ellipse,3=AreaPerimDist,4=Ellipse+Circ,5=BendCalc):", rawData, 0);
-		gd.addNumericField("bendDetect - (0=Off,1=Angle,2=AspectRatio,3=AR+Histogram):", bendType, 0);
 		gd.addNumericField("FPS - frames/s (0=try to load from file):", fps, 0);
 		gd.addNumericField("backSub - On-the-fly background subtraction (0=off,1=F1RB15):", backSub, 0);
 		gd.addChoice("threshMode - Thresholding method (only if backSub>0)", AutoThresholder.getMethods(), "Otsu");
 		gd.addNumericField("fontSize - Size of labeling font:", fontSize, 0);
 		gd.addNumericField("Maximum stitch distance", 25);
-		gd.addNumericField("# of frames in between samples (e.g. 30 = one sample per second)", 30);
+		gd.addNumericField("# of frames per sample (e.g. 30 = one sample per second at 30fps)", 30);
 		gd.addNumericField("# of objects (0 = unknown)", 5);
 		gd.addNumericField("pixels per mm", 7);
 		gd.showDialog();
@@ -247,19 +202,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		maxVelocity = (float) gd.getNextNumber();
 		maxAreaChange = (float) gd.getNextNumber();
 		minTrackLength = (int) gd.getNextNumber();
-		minAngle = (float) gd.getNextNumber();
-		binSize = (float) gd.getNextNumber();
-		bSaveResultsFile = gd.getNextBoolean();
-		bShowPathLengths = gd.getNextBoolean();
-		bShowLabels = gd.getNextBoolean();
-		bShowPositions = gd.getNextBoolean();
-		bShowPaths = gd.getNextBoolean();
-		bShowSummary = gd.getNextBoolean();
-		bRoundCoord = gd.getNextBoolean();
-		bSmoothing = gd.getNextBoolean();
-		bPlotBendTrack = gd.getNextBoolean();
 		rawData = (int) gd.getNextNumber();
-		bendType = (int) gd.getNextNumber();
 		fps = (float) gd.getNextNumber();
 		backSub = (int) gd.getNextNumber();
 		threshMode = gd.getNextChoice();
@@ -268,25 +211,15 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		int framesPerSample = (int) gd.getNextNumber();
 		expectedObjects = (int) gd.getNextNumber();
 		pxPerMillimeter = (float) gd.getNextNumber();
-		if (bShowPositions)
-			bShowLabels = true;
 
 		/* Extract file name of movie file opened in ImageJ */
-
 		if (rawData < 0) {
 			rawData = -rawData;
-		} else {
 		}
-		;
 		rawFilename = imp.getTitle();
 		int dotPos = rawFilename.lastIndexOf('.');
 		if (0 < dotPos && dotPos < rawFilename.length() - 2) {
 			rawFilename = rawFilename.substring(0, dotPos);
-		}
-		if (bSaveResultsFile) {
-			SaveDialog sd = new SaveDialog("Save Track Results", rawFilename, ".txt");
-			directory = sd.getDirectory();
-			filename = sd.getFileName();
 		}
 		if (done)
 			return;
@@ -294,7 +227,8 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		track(imp, minSize, maxSize, maxVelocity, directory, filename, maxStitchDistance, framesPerSample);
 	}
 
-	@SuppressWarnings({ "deprecation", "rawtypes", "unchecked" })
+	// #region Track function (main)
+	@SuppressWarnings({ "rawtypes", "unchecked" })
 	public void track(ImagePlus imp, int minSize, int maxSize, float maxVelocity, String directory, String filename,
 			int maxStitchDistance, int framesPerSample) {
 		verbose = true;
@@ -415,13 +349,8 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 				// IJ.log("Frame"+iFrame+" contains "+sxRes.length+" objects");
 				for (int iPart = 0; iPart < sxRes.length; iPart++) {
 					particle particle = new particle();
-					if (bRoundCoord) {
-						particle.x = Math.round(sxRes[iPart]);// sxRes[iPart]; //
-						particle.y = Math.round(syRes[iPart]);// syRes[iPart];//
-					} else {
-						particle.x = sxRes[iPart];
-						particle.y = syRes[iPart];
-					}
+					particle.x = sxRes[iPart];
+					particle.y = syRes[iPart];
 
 					particle.area = areaRes[iPart];
 					particle.angle = angleRes[iPart];
@@ -438,11 +367,9 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 				}
 				if (sxRes.length > nMax) {
 					nMax = sxRes.length; // record the maximum number of particles found in one frame.
-					nMaxFrm = iFrame; // record the frame at which the maximum number of particles is found. (KP)
 				}
 				if (sxRes.length < nMin) {
 					nMin = sxRes.length; // record the minimum number of particles found in one frame. (KP)
-					nMinFrm = iFrame; // record the frame at which the minimum number of particles is found. (KP)
 				}
 			}
 			IJ.showProgress((double) iFrame / nFrames);
@@ -514,8 +441,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 					if (candidates.size() == 0) {
 						trackExists = false;
 						track.endFrame = j - 1;
-						IJ.log("Track " + trackCount + " ended at frame " + i + " after " +
-								track.particles.size() + " frames");
 					} else {
 						particle bestCandidate = getBestCandidate(candidates, candidateDistances);
 						bestCandidate.inTrack = true;
@@ -534,30 +459,28 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		// #region Raw tracks
 		IJ.showStatus("Generating map of raw tracks...");
 		IJ.log("Generating map of raw tracks...");
-		if (bShowPaths) {
-			ip = new ColorProcessor(imp.getWidth(), imp.getHeight());
-			ip.setColor(Color.white);
-			ip.fill();
-			for (ListIterator<Track> tracksIterator = tracks.listIterator(); tracksIterator.hasNext();) {
-				Track track = tracksIterator.next();
-				ListIterator<particle> particleIterator = track.particles.listIterator();
-				particle oldParticle = particleIterator.next();
+		ip = new ColorProcessor(imp.getWidth(), imp.getHeight());
+		ip.setColor(Color.white);
+		ip.fill();
+		for (ListIterator<Track> tracksIterator = tracks.listIterator(); tracksIterator.hasNext();) {
+			Track track = tracksIterator.next();
+			ListIterator<particle> particleIterator = track.particles.listIterator();
+			particle oldParticle = particleIterator.next();
 
-				if (track.particles.size() < minTrackLength) {
-					ip.setColor("grey");
-				} else {
-					ip.setColor("blue");
-				}
-
-				while (particleIterator.hasNext()) {
-					particle newParticle = particleIterator.next();
-					ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y / pixelHeight));
-					ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
-					oldParticle = newParticle;
-				}
+			if (track.particles.size() < minTrackLength) {
+				ip.setColor("grey");
+			} else {
+				ip.setColor("blue");
 			}
-			new ImagePlus("All Paths", ip).show();
+
+			while (particleIterator.hasNext()) {
+				particle newParticle = particleIterator.next();
+				ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y / pixelHeight));
+				ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
+				oldParticle = newParticle;
+			}
 		}
+		new ImagePlus("All Paths", ip).show();
 
 		// #region Track Stitching
 		IJ.log("Stitching tracks with max dist: " + maxStitchDistance);
@@ -673,9 +596,11 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			track.color = color;
 			ip.setColor(color);
 			int j = 1; // Start at 1 bc of the initial set
+			int lastIndex = 0;
 			while (particleIterator.hasNext()) {
 				particle newParticle = particleIterator.next();
 				if ((j % smoothing) == 0) {
+					lastIndex = j;
 					totalArea += newParticle.area;
 					float distance = oldParticle.distance(newParticle);
 					float pxPerSec = distance / (float) secPerSample;
@@ -691,23 +616,23 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			track.meanPxPerSec = totalPxPerSec / (track.particles.size() / smoothing);
 			track.meanMillimetersPerSec = track.meanPxPerSec / pxPerMillimeter;
 			particle first = track.particles.get(0);
-			particle last = track.particles.get(track.particles.size() - 1);
+			particle last = track.particles.get(lastIndex);
 
 			// Draw start and end points
-			ip.drawRect(Math.round(first.x), Math.round(first.y), 8, 8);
-			ip.drawRect(Math.round(last.x), Math.round(last.y), 3, 3);
+			ip.drawDot(Math.round(first.x), Math.round(first.y));
+			ip.drawDot(Math.round(last.x), Math.round(last.y));
 
 			track.startToEnd = first.distance(last);
 
 			// Label the track
 			float labelOffset = 10f;
-			ip.drawString(track.distance + "", Math.round(first.x + labelOffset),
-					Math.round(first.y + labelOffset));
+			ip.drawString("0", Math.round(first.x + labelOffset), Math.round(first.y + labelOffset));
+			ip.drawString(track.distance + "", Math.round(last.x + labelOffset), Math.round(last.y + labelOffset));
 			i++;
 		}
 		new ImagePlus("Stitch distance: " + maxStitchDistance + ", Smoothing: " + smoothing, ip).show();
 
-		// #Displaying output table
+		// #region Output table
 		ResultsTable mrt = ResultsTable.getResultsTable();
 		mrt.reset();
 
@@ -715,17 +640,16 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			mrt.incrementCounter();
 			Track track = tracksIterator.next();
 			mrt.addValue("Colour", track.color);
-			mrt.addValue("Length (mm)", track.distance / pxPerMillimeter);
+			mrt.addValue("Total distance (mm)", track.distance / pxPerMillimeter);
 			mrt.addValue("Distance from start to end (mm)", track.startToEnd / pxPerMillimeter);
-			mrt.addValue("MeanSpeed (mm/s)", track.meanMillimetersPerSec);
-			mrt.addValue("MeanArea (px)", track.meanArea);
+			mrt.addValue("Mean Speed (mm/s)", track.meanMillimetersPerSec);
+			mrt.addValue("Mean Object Area (sqpx)", track.meanArea);
 		}
 
 		mrt.show("Results");
 	}
 
 	// Utility functions
-
 	List<Track> getTracksStartedInFrame(List<Track> tracks, int frame) {
 		List<Track> out = new ArrayList<>();
 		for (Track track : tracks) {
@@ -761,7 +685,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		}
 	}
 
-	@SuppressWarnings("removal")
 	double s2d(String s) {
 		Double d;
 		try {
@@ -774,5 +697,4 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		else
 			return (0.0);
 	}
-
 }
