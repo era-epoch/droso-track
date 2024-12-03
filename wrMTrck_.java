@@ -79,6 +79,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 	static int plotBendTrack = 0;
 	static int expectedObjects = 0;
 	static float pxPerMillimeter = 7;
+	static float stopDistanceThreshhold = 1;
 
 	static int rawData = 0;
 	static double fps = 0;
@@ -144,10 +145,12 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 
 	// #region Track class
 	public class Track {
-		List<particle> particles = new ArrayList<particle>();
-		int startFrame;
-		int endFrame;
-		float distance;
+		public List<particle> particles = new ArrayList<particle>();
+		public int startFrame;
+		public int endFrame;
+		public int nStops;
+		public float totalSecondsStopped;
+		public float distance;
 		public String color;
 		public float meanArea;
 		public float startToEnd;
@@ -194,6 +197,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		gd.addNumericField("# of frames per sample (e.g. 30 = one sample per second at 30fps)", 30);
 		gd.addNumericField("# of objects (0 = unknown)", 5);
 		gd.addNumericField("pixels per mm", 7);
+		gd.addNumericField("stop distance threshhold(px)", 1);
 		gd.showDialog();
 		if (gd.wasCanceled())
 			return;
@@ -211,6 +215,7 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		int framesPerSample = (int) gd.getNextNumber();
 		expectedObjects = (int) gd.getNextNumber();
 		pxPerMillimeter = (float) gd.getNextNumber();
+		stopDistanceThreshhold = (float) gd.getNextNumber();
 
 		/* Extract file name of movie file opened in ImageJ */
 		if (rawData < 0) {
@@ -402,7 +407,6 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 				continue;
 
 			// IJ.log("Frame " + i + " has " + particlesInFrame[i].size() + " particles");
-
 			for (ListIterator particleIterator = particlesInFrame[i].listIterator(); particleIterator.hasNext();) {
 				particle particle = (particle) particleIterator.next();
 
@@ -583,32 +587,62 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 		ip.setColor(Color.white);
 		ip.fill();
 		String[] colors = { "red", "blue", "green", "orange", "cyan", "pink" };
+		String stoppedColor = "#ff000044";
 		int i = 0;
 		for (ListIterator<Track> tracksIterator = allTracks.listIterator(); tracksIterator.hasNext();) {
 			Track track = tracksIterator.next();
+			track.nStops = 0;
+			track.totalSecondsStopped = 0f;
 			track.distance = 0f;
 			float totalArea = 0f;
 			float totalPxPerSec = 0f;
+
 			IJ.log("Track length: " + track.length());
 			ListIterator<particle> particleIterator = track.particles.listIterator();
 			particle oldParticle = particleIterator.next();
 			String color = colors[i % colors.length];
 			track.color = color;
-			ip.setColor(color);
+
 			int j = 1; // Start at 1 bc of the initial set
+			boolean isStopped = false;
+			boolean wasStopped = false;
 			int lastIndex = 0;
 			while (particleIterator.hasNext()) {
 				particle newParticle = particleIterator.next();
+
+				// Only use certain samples (according to smoothing factor)
 				if ((j % smoothing) == 0) {
+					ip.setLineWidth(1);
+					ip.setColor(track.color);
 					lastIndex = j;
 					totalArea += newParticle.area;
 					float distance = oldParticle.distance(newParticle);
+
+					if (distance < stopDistanceThreshhold) {
+						isStopped = true;
+					} else {
+						isStopped = false;
+					}
+
 					float pxPerSec = distance / (float) secPerSample;
 					totalPxPerSec += pxPerSec;
 					track.distance += distance;
 					ip.moveTo((int) (oldParticle.x / pixelWidth), (int) (oldParticle.y / pixelHeight));
 					ip.lineTo((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
 					oldParticle = newParticle;
+
+					// If stopped:
+					if (isStopped) {
+						// If it wasn't stopped last sample, record a new stop
+						if (!wasStopped) {
+							track.nStops++;
+						}
+						track.totalSecondsStopped += secPerSample;
+						ip.setLineWidth(5);
+						ip.setColor(stoppedColor);
+						ip.drawDot((int) (newParticle.x / pixelWidth), (int) (newParticle.y / pixelHeight));
+					}
+					wasStopped = isStopped;
 				}
 				j++;
 			}
@@ -644,6 +678,8 @@ public class wrMTrck_ implements PlugInFilter, Measurements {
 			mrt.addValue("Distance from start to end (mm)", track.startToEnd / pxPerMillimeter);
 			mrt.addValue("Mean Speed (mm/s)", track.meanMillimetersPerSec);
 			mrt.addValue("Mean Object Area (sqpx)", track.meanArea);
+			mrt.addValue("# of stops", track.nStops);
+			mrt.addValue("Total time spent stopped (s)", track.totalSecondsStopped);
 		}
 
 		mrt.show("Results");
