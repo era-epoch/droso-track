@@ -11,6 +11,9 @@ import ij.plugin.filter.ParticleAnalyzer;
 import ij.plugin.filter.BackgroundSubtracter;
 
 /**
+ * custom wrMTrck by era (<https://era.fyi>, <mailto:contact@era.fyi>)
+ * - modified to improve and specify tracking of drosophilia larvae
+ * 
  * wrMTrck by Jesper Søndergaard Pedersen (JSP)
  * 
  * Uses ImageJ's particle analyzer to track the movement of
